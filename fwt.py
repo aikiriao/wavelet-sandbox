@@ -101,13 +101,13 @@ if __name__ == "__main__":
     import lzma
     from PIL import Image
 
-    def minmax_scale(vec, maxval):
+    def minmax_scale(vec, maxscale):
         minval = numpy.min(vec)
         maxval = numpy.max(vec)
         # ゼロ除算対策のため、非ゼロ要素だけ除算
         div = numpy.divide(vec - minval,
                            maxval - minval, where=((vec - minval) != 0))
-        return maxval * div
+        return maxscale * div
 
     def minmax_clip(vec, minval, maxval):
         vec = numpy.where(vec <= minval, minval, vec)
