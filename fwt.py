@@ -104,7 +104,10 @@ if __name__ == "__main__":
     def minmax_scale(vec, maxval):
         minval = numpy.min(vec)
         maxval = numpy.max(vec)
-        return maxval * (vec - minval) / (maxval - minval)
+        # ゼロ除算対策のため、非ゼロ要素だけ除算
+        div = numpy.divide(vec - minval,
+                           maxval - minval, where=((vec - minval) != 0))
+        return maxval * div
 
     def minmax_clip(vec, minval, maxval):
         vec = numpy.where(vec <= minval, minval, vec)
@@ -112,18 +115,32 @@ if __name__ == "__main__":
         return vec
 
     # 画像読み込み
-    raw_picture = numpy.asarray(Image.open(sys.argv[1])).astype(int)
-    raw_height = raw_picture.shape[0]
-    raw_width = raw_picture.shape[1]
+    img = Image.open(sys.argv[1])
+    # 幅/高さ/色モード/色次元取得
+    raw_height = img.height
+    raw_width = img.width
+    original_mode = img.mode
+    raw_picture = numpy.asarray(img).astype(int)
+    if len(raw_picture.shape) == 2:
+        colordim = 1
+    else:
+        colordim = raw_picture.shape[2]
+    # 処理統一のために3次元配列にreshape
+    raw_picture = raw_picture.reshape([raw_height, raw_width, colordim])
 
     # サイズを2の冪に切り上げ、配列に画像データをロード
     # 余白は0埋め
     extended_width = power_of_two(max(raw_width, raw_height))
-    extended = numpy.zeros(shape=(extended_width, extended_width), dtype=int)
-    extended[0:raw_height, 0:raw_width] = raw_picture[:, :]
+    extended = numpy.zeros(shape=(extended_width,
+                                  extended_width, colordim), dtype=int)
+    for cdim in range(colordim):
+        extended[0:raw_height, 0:raw_width, cdim] = raw_picture[:, :, cdim]
+
     # 分割結果の画像
-    octaveimg = numpy.zeros(shape=(extended_width, extended_width), dtype=int)
-    octavecoef = numpy.zeros(shape=(extended_width, extended_width), dtype=int)
+    octaveimg = numpy.zeros(shape=(extended_width,
+                                   extended_width, colordim), dtype=int)
+    octavecoef = numpy.zeros(shape=(extended_width,
+                                    extended_width, colordim), dtype=int)
 
     # ウェーブレット係数とスケーリング係数
     # wav_coef = [1, 1]                           # Haar
@@ -139,39 +156,52 @@ if __name__ == "__main__":
 
     # 解像度の最大深度
     max_dim = int(numpy.log2(extended_width)) - 1  # 最大解像度
-    # 多重解像度分析
-    octave_list = [extended]
-    for dim in range(max_dim):
-        # 先頭要素にスケーリング係数成分（左上分割成分）が入っている
-        ll_picture = octave_list.pop(0)
-        # スケーリング係数成分を4分割
-        decomp = fwt2d(ll_picture, wav_coef, scal_coef)
-        # 分割結果を画像にセット
-        width = decomp[0].shape[0]
-        octaveimg[0:width, 0:width] = minmax_scale(decomp[0], 255)
-        octaveimg[width:2*width, 0:width] = minmax_scale(decomp[1], 255)
-        octaveimg[0:width, width:2*width] = minmax_scale(decomp[2], 255)
-        octaveimg[width:2*width, width:2*width] = minmax_scale(decomp[3], 255)
-        octavecoef[0:width, 0:width] = decomp[0]
-        octavecoef[width:2*width, 0:width] = decomp[1]
-        octavecoef[0:width, width:2*width] = decomp[2]
-        octavecoef[width:2*width, width:2*width] = decomp[3]
-        # octave_listの先頭に結果を挿入
-        decomp.extend(octave_list)
-        # リスト先頭はoctave_listに再設定
-        octave_list = decomp
+    octave_list = [[extended[:, :, cdim]] for cdim in range(colordim)]
+    for cdim in range(colordim):
+        # 多重解像度分析
+        for dim in range(max_dim):
+            # 先頭要素にスケーリング係数成分（左上分割成分）が入っている
+            ll_picture = octave_list[cdim].pop(0)
+            # スケーリング係数成分を4分割
+            decomp = fwt2d(ll_picture, wav_coef, scal_coef)
+            # 分割結果を画像にセット
+            width = decomp[0].shape[0]
+            octaveimg[0:width, 0:width, cdim] \
+                = minmax_scale(decomp[0], 255)
+            octaveimg[width:2*width, 0:width, cdim] \
+                = minmax_scale(decomp[1], 255)
+            octaveimg[0:width, width:2*width, cdim] \
+                = minmax_scale(decomp[2], 255)
+            octaveimg[width:2*width, width:2*width, cdim] \
+                = minmax_scale(decomp[3], 255)
+            octavecoef[0:width, 0:width, cdim] = decomp[0]
+            octavecoef[width:2*width, 0:width, cdim] = decomp[1]
+            octavecoef[0:width, width:2*width, cdim] = decomp[2]
+            octavecoef[width:2*width, width:2*width, cdim] = decomp[3]
+            # octave_listの先頭に結果を挿入
+            decomp.extend(octave_list[cdim])
+            # リスト先頭はoctave_listに再設定
+            octave_list[cdim] = decomp
+
+        # 閾値の計算
+        sorted_coef \
+            = numpy.sort(
+               numpy.abs(numpy.ndarray.flatten(octavecoef[:, :, cdim])))[::-1]
+        threshould = sorted_coef[len(sorted_coef) // 90]
+
+        # 閾値以下の係数を0に（ハードスレッショルド） 整数に丸め込み
+        for i, oct_array in enumerate(octave_list[cdim]):
+            octave_list[cdim][i] \
+                = numpy.where(numpy.abs(oct_array) <= threshould, 0, oct_array)
+            octave_list[cdim][i] \
+                = numpy.round(octave_list[cdim][i]).astype(numpy.int32)
+
     # 多重解像度解析の結果を保存
-    Image.fromarray(numpy.uint8(octaveimg)).save("test_octave.png")
-
-    # 閾値の計算
-    sorted_coef \
-        = numpy.sort(numpy.abs(numpy.ndarray.flatten(octavecoef)))[::-1]
-    threshould = sorted_coef[len(sorted_coef) // 20]
-
-    # 閾値以下の係数を0に（ハードスレッショルド） 整数に丸め込み
-    for i, oct_array in enumerate(octave_list):
-        octave_list[i] = numpy.where(numpy.abs(oct_array) <= threshould, 0, oct_array)
-        octave_list[i] = numpy.round(octave_list[i]).astype(numpy.int32)
+    if colordim == 1:
+        imgarray = numpy.uint8(octaveimg[:, :, 0])
+    else:
+        imgarray = numpy.uint8(octaveimg[:, :, 0:colordim])
+    Image.fromarray(imgarray).convert(original_mode).save("test_octave.png")
 
     # LZMAで圧縮してみる
     data = [raw_height, raw_width, octave_list]
@@ -183,22 +213,34 @@ if __name__ == "__main__":
     # LZMAを展開
     lzma_decomp = lzma.LZMADecompressor()
     with open("test_compress.xz", "rb") as fin:
-        raw_height, raw_width, octave_list = pickle.loads(lzma.decompress(fin.read()))
-        
+        raw_height, raw_width, octave_list \
+            = pickle.loads(lzma.decompress(fin.read()))
+
     # 再構成
-    while len(octave_list) > 1:
-        # 先頭の解析結果から再構成
-        composed_img = ifwt2d(octave_list[0], octave_list[1],
-                              octave_list[2], octave_list[3], wav_coef, scal_coef)
-        # リスト先頭に構成中のデータcomposed_imgを再設定
-        octave_list = octave_list[3:]
-        octave_list[0] = composed_img
-    composed_img = octave_list[0]
+    composed_img \
+        = numpy.zeros(
+            shape=(extended_width, extended_width, colordim), dtype=int)
+    for cdim in range(colordim):
+        while len(octave_list[cdim]) > 1:
+            # 先頭の解析結果から再構成
+            comp = ifwt2d(octave_list[cdim][0], octave_list[cdim][1],
+                          octave_list[cdim][2], octave_list[cdim][3],
+                          wav_coef, scal_coef)
+            width = comp[0].shape[0]
+            composed_img[0:width, 0:width, cdim] = comp
+            # リスト先頭に構成中のデータを再設定
+            octave_list[cdim] = octave_list[cdim][3:]
+            octave_list[cdim][0] = comp
 
     # 画像の書き出し
-    # Image.fromarray(numpy.uint8(octave_list[0])).save("test_composed.png")
-    # Image.fromarray(numpy.uint8(minmax_clip(octave_list[0], 0, 255))).save("test_composed.png")
-    Image.fromarray(numpy.uint8(minmax_clip(composed_img[0:raw_height, 0:raw_width], 0, 255))).save("test_composed.png")
-    # Image.fromarray(numpy.uint8(minmax_scale(octave_list[0], 255))).save("test_composed.png")
+    if colordim == 1:
+        imgarray \
+            = numpy.uint8(minmax_clip(
+                composed_img[0:raw_height, 0:raw_width, 0], 0, 255))
+    else:
+        imgarray \
+            = numpy.uint8(minmax_clip(
+                composed_img[0:raw_height, 0:raw_width, 0:colordim], 0, 255))
+    Image.fromarray(imgarray).convert(original_mode).save("test_composed.png")
 
     sys.exit()
